@@ -73,7 +73,10 @@ func ResolveCacheImporterFunc(sm *session.Manager) remotecache.ResolveCacheImpor
 		if dgstStr == "" {
 			return nil, ocispecs.Descriptor{}, errors.New("local cache importer requires explicit digest")
 		}
-		dgst := digest.Digest(dgstStr)
+		dgst, err := digest.Parse(dgstStr)
+		if err != nil {
+			return nil, ocispecs.Descriptor{}, errors.Wrapf(err, "invalid local cache digest %q", dgstStr)
+		}
 		store := attrs[attrSrc]
 		if store == "" {
 			return nil, ocispecs.Descriptor{}, errors.New("local cache importer requires src")

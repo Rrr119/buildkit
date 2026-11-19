@@ -553,6 +553,7 @@ The directory layout conforms to OCI Image Spec v1.0.
   * `max`: export all the layers of all intermediate steps
 * `dest=<path>`: destination directory for cache exporter
 * `tag=<tag>`: specify custom tag of image to write to local index (default: `latest`)
+* `tenant=<id>`: namespace the manifest and tag within a shared local cache directory. Blobs remain content-addressed and are shared across tenants, while each tenant has a distinct index entry. This is a naming boundary, not an access-control boundary.
 * `image-manifest=<true|false>`: whether to export cache manifest as an OCI-compatible image manifest rather than a manifest list/index (default: `true` since BuildKit `v0.21`, must be used with `oci-mediatypes=true`)
 * `oci-mediatypes=<true|false>`: whether to use OCI mediatypes in exported manifests (default `true`, since BuildKit `v0.8`)
 * `compression=<uncompressed|gzip|estargz|zstd>`: choose compression type for layers newly created and cached, gzip is default value. estargz and zstd should be used with `oci-mediatypes=true`.
@@ -565,6 +566,7 @@ The directory layout conforms to OCI Image Spec v1.0.
 * `type=local`
 * `src=<path>`: source directory for cache importer
 * `tag=<tag>`: specify custom tag of image to read from local index (default: `latest`)
+* `tenant=<id>`: read the namespaced entry for this tenant. Use the same `tenant` and `tag` values as the exporter.
 * `digest=sha256:<sha256digest>`: specify explicit digest of the manifest list to import
 
 #### GitHub Actions cache (experimental)

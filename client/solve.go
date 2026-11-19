@@ -426,14 +426,16 @@ func (c *Client) solve(ctx context.Context, def *llb.Definition, runGateway runG
 		if err = json.Unmarshal([]byte(manifestDescJSON), &manifestDesc); err != nil {
 			return nil, err
 		}
-		for storePath, store := range cacheOpt.storesToUpdate {
+		for storePath, updates := range cacheOpt.storesToUpdate {
 			idx := ociindex.NewStoreIndex(storePath)
-			if err := idx.Put(manifestDesc, ociindex.Tag(store.tag)); err != nil {
-				if store.ignoreError {
-					bklog.G(callerCtx).WithError(err).WithField("cache_store_path", storePath).Warn("failed to update cache index, ignoring")
-					continue
+			for _, update := range updates {
+				if err := idx.Put(manifestDesc, ociindex.Tag(update.tag)); err != nil {
+					if update.ignoreError {
+						bklog.G(callerCtx).WithError(err).WithField("cache_store_path", storePath).Warn("failed to update cache index, ignoring")
+						continue
+					}
+					return nil, err
 				}
-				return nil, err
 			}
 		}
 	}
@@ -615,10 +617,43 @@ type cacheStoreUpdate struct {
 	ignoreError bool
 }
 
+const (
+	localCacheDefaultTag     = "latest"
+	localCacheTenantTagStart = "buildkit-tenant-"
+	localCacheMaxTagLength   = 128
+)
+
+// localCacheTag returns the index tag used for a local cache entry. Tenants
+// share the content-addressed blob store but get distinct tags, so identical
+// layers are deduplicated without exposing one tenant's manifests to another.
+func localCacheTag(attrs map[string]string) (string, error) {
+	tag, ok := attrs["tag"]
+	if !ok {
+		tag = localCacheDefaultTag
+	}
+	if tag == "" {
+		return "", errors.New("local cache tag must not be empty")
+	}
+
+	tenant := attrs["tenant"]
+	if tenant == "" {
+		return tag, nil
+	}
+
+	prefix := localCacheTenantTagStart + digest.FromString(tenant).Encoded()[:16] + "-"
+	if len(prefix)+len(tag) <= localCacheMaxTagLength {
+		return prefix + tag, nil
+	}
+
+	// Keep the generated reference a valid OCI tag when the caller supplies a
+	// long tag. The digest includes both values, avoiding truncated collisions.
+	return localCacheTenantTagStart + digest.FromString(tenant+"\x00"+tag).Encoded(), nil
+}
+
 type cacheOptions struct {
 	options        controlapi.CacheOptions
 	contentStores  map[string]content.Store // key: ID of content store ("local:" + csDir)
-	storesToUpdate map[string]cacheStoreUpdate
+	storesToUpdate map[string][]cacheStoreUpdate
 	storesToReset  []cacheStoreRef // cache stores with reset=true
 	frontendAttrs  map[string]string
 }
@@ -630,7 +665,7 @@ func parseCacheOptions(ctx context.Context, isGateway bool, opt SolveOpt) (*cach
 	)
 	var storesToReset []cacheStoreRef
 	contentStores := make(map[string]content.Store)
-	storesToUpdate := make(map[string]cacheStoreUpdate)
+	storesToUpdate := make(map[string][]cacheStoreUpdate)
 	frontendAttrs := make(map[string]string)
 	for _, ex := range opt.CacheExports {
 		if ex.Type == "local" {
@@ -647,9 +682,9 @@ func parseCacheOptions(ctx context.Context, isGateway bool, opt SolveOpt) (*cach
 			}
 			contentStores["local:"+csDir] = cs
 
-			tag := "latest"
-			if t, ok := ex.Attrs["tag"]; ok {
-				tag = t
+			tag, err := localCacheTag(ex.Attrs)
+			if err != nil {
+				return nil, err
 			}
 			update := cacheStoreUpdate{tag: tag}
 			if v, ok := ex.Attrs["ignore-error"]; ok {
@@ -657,8 +692,8 @@ func parseCacheOptions(ctx context.Context, isGateway bool, opt SolveOpt) (*cach
 					update.ignoreError = b
 				}
 			}
-			// TODO(AkihiroSuda): support custom index JSON path and tag
-			storesToUpdate[csDir] = update
+			// TODO(AkihiroSuda): support custom index JSON path
+			storesToUpdate[csDir] = append(storesToUpdate[csDir], update)
 
 			if v, ok := ex.Attrs["reset"]; ok {
 				b, err := strconv.ParseBool(v)
@@ -693,14 +728,19 @@ func parseCacheOptions(ctx context.Context, isGateway bool, opt SolveOpt) (*cach
 				continue
 			}
 			dgst := im.Attrs["digest"]
+			if dgst != "" {
+				parsed, err := digest.Parse(dgst)
+				if err != nil {
+					return nil, errors.Wrapf(err, "invalid local cache digest %q", dgst)
+				}
+				dgst = parsed.String()
+				im.Attrs["digest"] = dgst
+			}
 			// if digest is not specified, attempt to load from tag
 			if dgst == "" {
-				tag := "latest"
-				if t, ok := im.Attrs["tag"]; ok {
-					tag = t
-				}
-				if tag == "" {
-					return nil, errors.New("local cache importer requires either explicit digest, \"latest\" tag or custom tag on index.json")
+				tag, err := localCacheTag(im.Attrs)
+				if err != nil {
+					return nil, err
 				}
 
 				idx := ociindex.NewStoreIndex(csDir)
